@@ -37,6 +37,11 @@ df[[f"{c}_aligned" for c in sleep_action_cols]] = (
 action_cols = ["step_cat", "norm_ent_cat", "totalSleep_cat_aligned", "sleep_onset_cat_aligned"]
 
 
+phq_df = pd.read_csv("./data/phq_subgroup.csv")
+df = pd.merge(df, phq_df, on="id", how="left")
+
+
+
 # ============================================================
 # 1. Reward 계산 (t+1 - t)
 # ============================================================
@@ -88,7 +93,78 @@ print(pop_model.summary())
 
 
 # ============================================================
-# 4. Mixed effects 모델 (개인별 + 전체 동시에)
+# 4. Subgroup analysis
+# ============================================================
+somatic_flag = (phq_df["somantic"] > phq_df["cognitive"]).astype(int)
+subgroup_flags = pd.DataFrame({
+    id_col: phq_df["id"],
+    "somatic_higher": somatic_flag,
+    "depression_diagnosis": phq_df["depression_diagnosis"].astype(bool),
+    "on_medication": phq_df["medication_current"].notna(),
+})
+
+model_df = pd.merge(model_df, subgroup_flags, on=id_col, how="left")
+
+
+def run_subgroup_regression(data, group_col, group_value, predictor_cols):
+    """group_col == group_value 인 subset에 대해 회귀를 돌리고 결과를 반환"""
+    sub = data[data[group_col] == group_value]
+    formula = "total_reward ~ " + " + ".join(predictor_cols)
+    model = smf.ols(formula, data=sub).fit()
+    return model
+
+
+def compare_subgroups(data, group_col, predictor_cols, labels=("Group 0", "Group 1")):
+    """group_col 기준 True/False(또는 0/1) 두 그룹의 회귀 결과를 비교"""
+    model_0 = run_subgroup_regression(data, group_col, False, predictor_cols)
+    model_1 = run_subgroup_regression(data, group_col, True, predictor_cols)
+
+    print(f"\n=== {group_col} 기준 비교 ===")
+    print(f"\n--- {labels[0]} (n={int(model_0.nobs)}) ---")
+    print(model_0.summary())
+    print(f"\n--- {labels[1]} (n={int(model_1.nobs)}) ---")
+    print(model_1.summary())
+
+    # 계수만 뽑아서 나란히 비교하는 테이블
+    coef_compare = pd.DataFrame({
+        labels[0]: model_0.params,
+        f"{labels[0]}_pvalue": model_0.pvalues,
+        labels[1]: model_1.params,
+        f"{labels[1]}_pvalue": model_1.pvalues,
+    })
+    print(f"\n--- {group_col} 계수 비교 테이블 ---")
+    print(coef_compare)
+
+    return model_0, model_1, coef_compare
+
+# ------------------------------------------------------------
+# 4-1. Somatic vs Cognitive (somatic이 더 높은 사람 vs 아닌 사람)
+# ------------------------------------------------------------
+somatic_model_low, somatic_model_high, somatic_coef = compare_subgroups(
+    model_df, "somatic_higher", predictor_cols,
+    labels=("Cognitive higher/equal", "Somatic higher")
+)
+
+# ------------------------------------------------------------
+# 4-2. 우울 진단 여부
+# ------------------------------------------------------------
+dep_model_no, dep_model_yes, dep_coef = compare_subgroups(
+    model_df, "depression_diagnosis", predictor_cols,
+    labels=("No diagnosis", "Depression diagnosis")
+)
+
+# ------------------------------------------------------------
+# 4-3. 약물 복용 여부
+# ------------------------------------------------------------
+med_model_no, med_model_yes, med_coef = compare_subgroups(
+    model_df, "on_medication", predictor_cols,
+    labels=("No medication", "On medication")
+)
+
+
+
+# ============================================================
+# 5. Mixed effects 모델 (개인별 + 전체 동시에)
 #    action_cols 중 하나만 우선 random slope로 (여러 개 넣으면 수렴 어려움)
 # ============================================================
 valid_ids = model_df.groupby(id_col).size()
